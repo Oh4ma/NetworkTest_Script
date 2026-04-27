@@ -1,32 +1,41 @@
-import socket
+import importlib
+import json
 import re
-import requests
-from time import time
-from tqdm import tqdm
-import speedtest
 import sys
 import platform
+from time import time
+
+requests = None
+tqdm = None
+speedtest = None
 
 def check_dependencies():
+    global requests, tqdm, speedtest
+
     missing_dependencies = []
-    try:
-        import requests
-    except ImportError:
-        missing_dependencies.append("requests")
-    try:
-        import tqdm
-    except ImportError:
-        missing_dependencies.append("tqdm")
-    try:
-        import speedtest
-    except ImportError:
-        missing_dependencies.append("speedtest-cli")
+    dependencies = (
+        ("requests", "requests"),
+        ("tqdm", "tqdm"),
+        ("speedtest", "speedtest-cli"),
+    )
+
+    loaded_modules = {}
+    for import_name, package_name in dependencies:
+        try:
+            loaded_modules[import_name] = importlib.import_module(import_name)
+        except ImportError:
+            missing_dependencies.append(package_name)
 
     if missing_dependencies:
         print("缺少以下依賴項，請安裝後再執行:")
         for dep in missing_dependencies:
             print(f"- {dep}")
+        print("\n建議使用 networktest.sh 或 networktest.ps1 執行，腳本會自動建立虛擬環境。")
         sys.exit(1)
+
+    requests = loaded_modules["requests"]
+    tqdm = loaded_modules["tqdm"].tqdm
+    speedtest = loaded_modules["speedtest"]
 
 def fetch_current_ip_info():
     try:
@@ -44,7 +53,7 @@ def fetch_current_ip_info():
 
 def fetch_endpoints(url):
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         return response.text
     except Exception as e:
@@ -52,13 +61,21 @@ def fetch_endpoints(url):
         return None
 
 def extract_urls_and_regions(endpoints_data):
-    urls_and_regions = []
-    endpoint_pattern = re.compile(r'"([a-z0-9-]+)": \{[^}]*?URL:\s+"(https?://[^"]+)"')
-    matches = endpoint_pattern.findall(endpoints_data)
-    for region, url in matches:
-        clean_url = re.sub(r'/$', '', url) 
-        urls_and_regions.append((region, clean_url + "/api/ping"))
-    return urls_and_regions
+    try:
+        endpoints = json.loads(endpoints_data)
+        return [
+            (region, endpoint["URL"].rstrip("/") + "/api/ping")
+            for region, endpoint in endpoints.items()
+            if isinstance(endpoint, dict) and endpoint.get("URL")
+        ]
+    except json.JSONDecodeError:
+        urls_and_regions = []
+        endpoint_pattern = re.compile(r'"([a-z0-9-]+)": \{[^}]*?URL:\s+"(https?://[^"]+)"')
+        matches = endpoint_pattern.findall(endpoints_data)
+        for region, url in matches:
+            clean_url = re.sub(r'/$', '', url)
+            urls_and_regions.append((region, clean_url + "/api/ping"))
+        return urls_and_regions
 
 def check_https(url, attempts=5):
     try:
@@ -98,13 +115,16 @@ def main():
     print(f"ISP: {isp}\n")
 
     # 尋找GCP節點
-    endpoints_url = "https://raw.githubusercontent.com/GoogleCloudPlatform/gcping/refs/heads/main/internal/config/endpoints.go"
+    endpoints_url = "https://global.gcping.com/api/endpoints"
     endpoints_data = fetch_endpoints(endpoints_url)
 
     if not endpoints_data:
         return
 
     urls_and_regions = extract_urls_and_regions(endpoints_data)
+    if not urls_and_regions:
+        print("沒有取得可測試的 GCP 節點")
+        return
 
     results = []
     with tqdm(total=len(urls_and_regions) + 1, desc="進度") as progress:
@@ -123,7 +143,7 @@ def main():
     for region, response_time in sorted_results:
         print(f"{region} - {response_time:.2f} ms")
 
-    if download_speed and upload_speed:
+    if download_speed is not None and upload_speed is not None:
         print("\n網路測速結果:")
         print(f"下載速度: {download_speed:.2f} Mbps")
         print(f"上傳速度: {upload_speed:.2f} Mbps")

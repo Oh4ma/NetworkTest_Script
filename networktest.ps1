@@ -1,16 +1,12 @@
-# 檢測系統
-$IsWin = $IsMac = $IsLin = $false
-
-if ($PSVersionTable.OS -like "*Windows*") {
-    $IsWin = $true
-    $PythonCommand = "python"
-} elseif ($PSVersionTable.OS -like "*Darwin*") {
-    $IsMac = $true
-    $PythonCommand = "python3"
+$IsWin = [System.Environment]::OSVersion.Platform -eq "Win32NT"
+$Uname = if (-Not $IsWin -And (Get-Command uname -ErrorAction SilentlyContinue)) {
+    & uname -s
 } else {
-    $IsLin = $true
-    $PythonCommand = "python3"
+    ""
 }
+$IsMac = $Uname -eq "Darwin"
+$IsLin = $Uname -eq "Linux"
+$PythonCommand = if ($IsWin) { "python" } else { "python3" }
 
 # 檢查 Python 是否安裝
 if (-Not (Get-Command $PythonCommand -ErrorAction SilentlyContinue)) {
@@ -22,35 +18,52 @@ if (-Not (Get-Command $PythonCommand -ErrorAction SilentlyContinue)) {
 
 Write-Host "$PythonCommand 已安裝"
 
-# 檢查 pip 是否安裝
-if (-Not (Get-Command pip3 -ErrorAction SilentlyContinue)) {
-    Write-Host "pip 未安裝，正在安裝 pip..."
-    Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile "get-pip.py"
-    & $PythonCommand get-pip.py
-    Remove-Item "get-pip.py"
-} else {
-    Write-Host "pip 已安裝"
-}
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+$VenvDir = Join-Path $TempDir "venv"
+$ScriptPath = Join-Path $TempDir "networktest.py"
 
-# 檢查並安裝必要的依賴項
-$RequiredPackages = @("requests", "tqdm", "speedtest-cli")
-foreach ($Package in $RequiredPackages) {
-    $PackageCheck = & $PythonCommand -m pip show $Package
-    if (-Not $PackageCheck) {
-        Write-Host "正在安裝 $Package..."
-        & $PythonCommand -m pip install $Package
-    } else {
-        Write-Host "$Package 已安裝"
-    }
-}
+New-Item -ItemType Directory -Path $TempDir | Out-Null
 
-# 執行 Python 腳本
-$URL = "https://raw.githubusercontent.com/OH4MA/NetworkTest_Script/main/networktest.py"
 try {
-    Invoke-WebRequest -Uri $URL -OutFile "networktest.py"
-    & $PythonCommand networktest.py
-    Remove-Item "networktest.py"
+    Write-Host "正在建立臨時 Python 虛擬環境..."
+    & $PythonCommand -m venv $VenvDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "無法建立 Python 虛擬環境"
+    }
+
+    $VenvPython = if ($IsWin) {
+        Join-Path $VenvDir "Scripts/python.exe"
+    } else {
+        Join-Path $VenvDir "bin/python"
+    }
+
+    # 檢查並安裝必要的依賴項
+    $RequiredPackages = @("requests", "tqdm", "speedtest-cli")
+    foreach ($Package in $RequiredPackages) {
+        & $VenvPython -m pip show $Package *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "正在安裝 $Package..."
+            & $VenvPython -m pip install $Package
+            if ($LASTEXITCODE -ne 0) {
+                throw "無法安裝 $Package"
+            }
+        } else {
+            Write-Host "$Package 已安裝"
+        }
+    }
+
+    # 執行 Python 腳本
+    $URL = "https://raw.githubusercontent.com/OH4MA/NetworkTest_Script/main/networktest.py"
+    Invoke-WebRequest -Uri $URL -OutFile $ScriptPath
+    & $VenvPython $ScriptPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 網路測試腳本執行失敗"
+    }
 } catch {
-    Write-Host "無法執行 Python 網路測試腳本"
+    Write-Host "無法執行 Python 網路測試腳本: $_"
     Exit 1
+} finally {
+    if (Test-Path $TempDir) {
+        Remove-Item -Recurse -Force $TempDir
+    }
 }
